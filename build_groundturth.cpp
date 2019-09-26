@@ -20,7 +20,7 @@ void get_gt(float *mass, float *massQ, size_t vecsize, size_t qsize, L2Space &l2
     (vector<std::priority_queue<std::pair<float, labeltype >>>(qsize)).swap(answers);
     //answers.swap(vector<std::priority_queue< std::pair< float, labeltype >>>(qsize));
     for (int i = 0; i < qsize; i++) {
-        std::priority_queue<std::pair<float, labeltype >> gt = bs.searchKnn(massQ + vecdim * i, 10);
+        std::priority_queue<std::pair<float, labeltype >> gt = bs.searchKnn(massQ + vecdim * i, 100);
         answers[i] = gt;
     }
 }
