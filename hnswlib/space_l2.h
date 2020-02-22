@@ -15,7 +15,7 @@ struct hash_pair {
 
 namespace hnswlib {
     unsigned long long discompcounter=0;
-    unordered_map<pair<size_t, size_t>, int, hash_pair> dishash;
+    unordered_map<pair<size_t, size_t>, unsigned long long, hash_pair> dishash;
     void clean_dist_comp_time(){
       discompcounter=0;
       dishash.clear();
@@ -25,7 +25,7 @@ namespace hnswlib {
         unsigned long long unique_comp=0;
         for(auto it:dishash)
             if(it.second!=0)
-            unique_comp++;
+                unique_comp++;
         //std::cout<<"unique distance computation number is "<<unique_comp<<std::endl;
         std::cout<<discompcounter<<" "<<unique_comp<<endl;
     }
@@ -212,7 +212,7 @@ namespace hnswlib {
 
     static int
     L2SqrI(const void *__restrict pVect1, const void *__restrict pVect2, const void *__restrict qty_ptr) {
-    /*
+/*
         discompcounter++;
         size_t temp1=(size_t)pVect1;
         size_t temp2=(size_t)pVect2;
@@ -221,7 +221,7 @@ namespace hnswlib {
             dishash[make_pair(temp1,temp2)]++;
         else
             dishash[make_pair(temp2,temp1)]++;
-        */
+*/
         size_t qty = *((size_t *) qty_ptr);
         int res = 0;
         unsigned char *a = (unsigned char *) pVect1;

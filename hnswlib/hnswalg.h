@@ -8,7 +8,6 @@
 #include <unordered_set>
 #include <list>
 
-
 namespace hnswlib {
     typedef unsigned int tableint;
     typedef unsigned int linklistsizeint;
@@ -28,13 +27,12 @@ namespace hnswlib {
         HierarchicalNSW(SpaceInterface<dist_t> *s, size_t max_elements, size_t M = 48, size_t ef_construction = 200, size_t random_seed = 100) :
                 link_list_locks_(max_elements), element_levels_(max_elements) {
             max_elements_ = max_elements;  //the # opf total elements in dataset
-
             has_deletions_=false;
             data_size_ = s->get_data_size();
             fstdistfunc_ = s->get_dist_func();
             dist_func_param_ = s->get_dist_func_param();
             M_ = M;
-            maxM_ = M_;
+            maxM_ = M_ * 2;
             maxM0_ = M_ * 2;
             //maxM0_ = M_;
             ef_construction_ = std::max(ef_construction,M_);
@@ -65,7 +63,10 @@ namespace hnswlib {
 
             //jie: allocate a pointer pointing to link
             linkLists_ = (char **) malloc(sizeof(void *) * max_elements_);
-            size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
+            size_links_per_element_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
+
+            size_links_per_element_level1 = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
+
             mult_ = 1 / log(1.0 * M_);
             revSize_ = 1.0 / mult_;
         }
@@ -92,11 +93,14 @@ namespace hnswlib {
         size_t cur_element_count;   //global variable
         size_t size_data_per_element_;
         size_t size_links_per_element_;
+        //jie;
+        size_t size_links_per_element_level1;
 
         size_t M_;
         size_t maxM_;
         size_t maxM0_;
         size_t ef_construction_;
+
 
         double mult_, revSize_;
         int maxlevel_;
@@ -129,21 +133,22 @@ namespace hnswlib {
 
         std::default_random_engine level_generator_;
 
+
         inline labeltype getExternalLabel(tableint internal_id) const {
             labeltype return_label;
             memcpy(&return_label,(data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), sizeof(labeltype));
             return return_label;
         }
 
-        inline void setExternalLabel(tableint internal_id, labeltype label) const {
+        inline void setExternalLabel(tableint internal_id, labeltype label) const { //set the value
             memcpy((data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), &label, sizeof(labeltype));
         }
 
-        inline labeltype *getExternalLabeLp(tableint internal_id) const {
+        inline labeltype *getExternalLabeLp(tableint internal_id) const { //return the value
             return (labeltype *) (data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
         }
 
-        inline char *getDataByInternalId(tableint internal_id) const {
+        inline char *getDataByInternalId(tableint internal_id) const { //return the address
             return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
         }
 
@@ -152,6 +157,15 @@ namespace hnswlib {
             double temp=distribution(level_generator_);
             double r = -log(temp) * reverse_size;
 
+
+            //jie: generate graph with level 1 promotion rate = PR
+            double pr = (double)1/(double)4;
+            if(pr>0 && (int)r==0)
+            {
+                double ttemp=distribution(level_generator_);
+                if(ttemp<=pr)
+                  r=1;
+            }
             //int n = 50*1000000;
             //std::cout<<"before zipf"<<std::endl;
             //double result = (double)zipf(1.0, n)/(double)n;
@@ -388,11 +402,17 @@ namespace hnswlib {
             return (linklistsizeint *) (linkLists_[internal_id] + (level - 1) * size_links_per_element_);
         };
 
+        linklistsizeint *get_linklist_level1(tableint internal_id, int level) const {
+            return (linklistsizeint *) (linkLists_[internal_id] + (level - 1) * size_links_per_element_level1);
+        };
+
         void mutuallyConnectNewElement(void *data_point, tableint cur_c,
                                        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates,
                                        int level) {
 
-            size_t Mcurmax = level ? maxM_ : maxM0_;
+            //size_t Mcurmax = level ? maxM_ : maxM0_;
+            //jie: level 1 connection=2M
+            size_t Mcurmax = level>1 ? maxM_ : maxM0_;
             getNeighborsByHeuristic2(top_candidates, M_);
             if (top_candidates.size() > M_)
                 throw std::runtime_error("Should be not be more than M_ candidates returned by the heuristic");
@@ -494,9 +514,21 @@ namespace hnswlib {
 
         std::mutex global;
         size_t ef_;
+        //jie:
+        size_t ef_l1_;
+        size_t ef_reuse_;
 
         void setEf(size_t ef) {
             ef_ = ef;
+        }
+
+        void setEf_l1(size_t ef) {
+            ef_l1_ = ef;
+        }
+
+        void setEf_reuse(size_t ef)
+        {
+            ef_reuse_ = ef;
         }
 
 
@@ -825,7 +857,7 @@ namespace hnswlib {
                 auto search = label_lookup_.find(label);
                 if (search != label_lookup_.end()) {
                     std::unique_lock <std::mutex> lock_el(link_list_locks_[search->second]);
-                    markDeletedInternal(search->second); //Jie: what's this for???
+                    markDeletedInternal(search->second); //Jie: what's this for??? This avoids some elements might be added twice
                 }
                 label_lookup_[label] = cur_c;
             }
@@ -859,6 +891,20 @@ namespace hnswlib {
                 memset(linkLists_[cur_c], 0, size_links_per_element_ * curlevel + 1);
             }
 
+      /*      //jie: allocate more space fpr level 1 to ensure 2M connections
+            if (curlevel>1) { //upper level allocate memory
+                linkLists_[cur_c] = (char *) malloc(size_links_per_element_ * curlevel + 1);  //jie: why +1
+                //every element all links are allocated together
+                memset(linkLists_[cur_c], 0, size_links_per_element_ * curlevel + 1);
+            }
+
+            else if (curlevel==1) { //upper level allocate memory
+                linkLists_[cur_c] = (char *) malloc(size_links_per_element_* 2 * curlevel + 1);  //jie: why +1
+                //every element all links are allocated together
+                memset(linkLists_[cur_c], 0, size_links_per_element_* 2 * curlevel + 1);
+            }
+      */
+
             if ((signed)currObj != -1) { //currObj is enter point
 
                 if (curlevel < maxlevelcopy) {
@@ -873,7 +919,11 @@ namespace hnswlib {
                             changed = false;
                             unsigned int *data;
                             std::unique_lock <std::mutex> lock(link_list_locks_[currObj]);
+
                             data = get_linklist(currObj,level);
+
+                            //data = get_linklist_level1(currObj, level);
+
                             int size = getListCount(data); //jie:???
 
                             tableint *datal = (tableint *) (data + 1);
@@ -957,8 +1007,9 @@ namespace hnswlib {
             cout<<"large than 100 nodes "<<largerthan<<endl;
         }
 
+/*
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
-        searchFirstLayer(tableint ep_id, const void *data_point) const {
+        searchFirstLayer(tableint ep_id, const void *data_point, size_t ef) const {
             int layer=1;
             VisitedList *vl = visited_list_pool_->getFreeVisitedList();
             vl_type *visited_array = vl->mass;
@@ -990,7 +1041,7 @@ namespace hnswlib {
 
                 //std::unique_lock <std::mutex> lock(link_list_locks_[curNodeNum]);
 
-                int *data = (int*)get_linklist(curNodeNum, layer);
+                int *data = (int*)get_linklist(curNodeNum, 1);
 //                  data = (int *) (linkLists_[curNodeNum] + (layer - 1) * size_links_per_element_);
                 size_t size = getListCount((linklistsizeint*)data);
                 tableint *datal = (tableint *) (data + 1);
@@ -1021,7 +1072,7 @@ namespace hnswlib {
                         if (!isMarkedDeleted(candidate_id))
                             top_candidates.emplace(dist1, candidate_id);
 
-                        if (top_candidates.size() > ef_construction_)
+                        if (top_candidates.size() > ef)
                             top_candidates.pop();
 
                         if (!top_candidates.empty())
@@ -1030,20 +1081,205 @@ namespace hnswlib {
                 }
             }
             visited_list_pool_->releaseVisitedList(vl);
+
+            return top_candidates;
+        }
+*/
+
+        //jie: for reuse
+        //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates_g;
+        //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set_g;
+///*
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+        searchFirstLayer(tableint ep_id, const void *data_point, size_t ef, std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates_g,
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &candidate_set_g) const{
+            int layer=1;
+            VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+            vl_type *visited_array = vl->mass;
+            vl_type visited_array_tag = vl->curV;
+
+            //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidateSet;
+
+            dist_t lowerBound;  //jie: lowerbound is for the farest distance between top_candidates and target
+            if (!isMarkedDeleted(ep_id)) {
+                dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);
+                top_candidates_g.emplace(dist, ep_id);
+                lowerBound = dist;
+                candidate_set_g.emplace(-dist, ep_id);
+            } else {
+                lowerBound = std::numeric_limits<dist_t>::max();
+                candidate_set_g.emplace(-lowerBound, ep_id);
+            }
+            visited_array[ep_id] = visited_array_tag;
+            //cout<<"top candidates set is "<<candidate_set_g.size()<<endl;
+
+            while (!candidate_set_g.empty()) {
+                std::pair<dist_t, tableint> curr_el_pair = candidate_set_g.top();  //nearest neighbor from candidates set
+                if ((-curr_el_pair.first) > lowerBound) {   //jie: stop searching condition: nearest distance from target to candidates is larger than target to top_candidates
+                    break;
+                }
+                candidate_set_g.pop();
+
+                tableint curNodeNum = curr_el_pair.second;  //current vector id
+
+                //std::unique_lock <std::mutex> lock(link_list_locks_[curNodeNum]);
+
+                int *data = (int*)get_linklist(curNodeNum, 1);
+//                  data = (int *) (linkLists_[curNodeNum] + (layer - 1) * size_links_per_element_);
+                size_t size = getListCount((linklistsizeint*)data);
+                tableint *datal = (tableint *) (data + 1);
+#ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
+                _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+                _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
+                _mm_prefetch(getDataByInternalId(*(datal + 1)), _MM_HINT_T0);
+#endif
+
+                for (size_t j = 0; j < size; j++) {
+                    tableint candidate_id = *(datal + j);
+//                    if (candidate_id == 0) continue;
+#ifdef USE_SSE
+                    _mm_prefetch((char *) (visited_array + *(datal + j + 1)), _MM_HINT_T0);
+                    _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+#endif
+                    if (visited_array[candidate_id] == visited_array_tag) continue;
+                    visited_array[candidate_id] = visited_array_tag;
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+                    dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);
+
+                    if (top_candidates_g.size() < ef|| lowerBound > dist1) {
+                        candidate_set_g.emplace(-dist1, candidate_id);
+#ifdef USE_SSE
+                        _mm_prefetch(getDataByInternalId(candidate_set_g.top().second), _MM_HINT_T0);
+#endif
+
+                        if (!isMarkedDeleted(candidate_id))
+                            top_candidates_g.emplace(dist1, candidate_id);
+
+                        if (top_candidates_g.size() > ef)
+                            top_candidates_g.pop();
+
+                        if (!top_candidates_g.empty())
+                            lowerBound = top_candidates_g.top().first;
+                    }
+                }
+            }
+            visited_list_pool_->releaseVisitedList(vl);
+            //top_candidates_g(top_candidates);
+            //candidate_set_g(candidateSet);
+            return top_candidates_g;
+        }
+
+//*/
+
+
+        template <bool has_deletions>
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+        searchBaseLayerST_reuse(tableint ep_id, const void *data_point, size_t ef, std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates, std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &candidate_set) const{
+            VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+            vl_type *visited_array = vl->mass;
+            vl_type visited_array_tag = vl->curV;
+
+            //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+            dist_t lowerBound;
+            if (!has_deletions || !isMarkedDeleted(ep_id)) {
+                dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);
+                lowerBound = dist;
+                top_candidates.emplace(dist, ep_id);
+                //candidate_set.emplace(-dist, ep_id);
+            } else {
+                lowerBound = std::numeric_limits<dist_t>::max();
+                candidate_set.emplace(-lowerBound, ep_id);
+            }
+
+            visited_array[ep_id] = visited_array_tag;
+
+            while (!candidate_set.empty()) {
+
+                std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+
+                if ((-current_node_pair.first) > lowerBound) {
+                    break;
+                }
+                candidate_set.pop();
+
+                tableint current_node_id = current_node_pair.second;
+                //jie:test
+
+                int *data = (int *) get_linklist0(current_node_id);
+                size_t size = getListCount((linklistsizeint*)data);
+        //                bool cur_node_deleted = isMarkedDeleted(current_node_id);
+
+        #ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
+                _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+                _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
+                _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
+        #endif
+
+                for (size_t j = 1; j <= size; j++) {
+                    int candidate_id = *(data + j);
+        //                    if (candidate_id == 0) continue;
+        #ifdef USE_SSE
+                    _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
+                    _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+                                 _MM_HINT_T0);////////////
+        #endif
+                    if (!(visited_array[candidate_id] == visited_array_tag)) {
+
+                        visited_array[candidate_id] = visited_array_tag;
+
+                        char *currObj1 = (getDataByInternalId(candidate_id));
+                        dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(-dist, candidate_id);
+        #ifdef USE_SSE
+                            _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+                                         offsetLevel0_,///////////
+                                         _MM_HINT_T0);////////////////////////
+        #endif
+
+                            if (!has_deletions || !isMarkedDeleted(candidate_id))
+                            {
+                                  top_candidates.emplace(dist, candidate_id);
+                            }
+
+                            if (top_candidates.size() > ef)
+                                top_candidates.pop();
+
+                            if (!top_candidates.empty())
+                                lowerBound = top_candidates.top().first;
+                        }
+                    }
+                }
+            }
+
+            visited_list_pool_->releaseVisitedList(vl);
+            //std::cout<<" "<<hop<<" ";
             return top_candidates;
         }
 
+        /* SerachKNN*/
+
         std::priority_queue<std::pair<dist_t, labeltype >> searchKnn(const void *query_data, size_t k) const {
             //for distance computation check
-
+            //cout<<"test"<<endl;
             tableint currObj = enterpoint_node_;
             dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
             int hop=0;
             //std::cout<<maxlevel_<<std::endl;
             //for (int level = maxlevel_; level > 0; level--) {
             //jie: change searching ef on level 1
-            for (int level = maxlevel_; level > 0; level--) {
+            tableint temp_currObj;
+            for (int level = maxlevel_; level > 1; level--) {
                 bool changed = true;
+                //if(level==1)
+                    //clean_dist_comp_time();
+                    //temp_currObj = currObj;
                 while (changed) {
                     changed = false;
                     unsigned int *data;
@@ -1062,29 +1298,73 @@ namespace hnswlib {
                             changed = true;
                         }
                     }
-                    hop++;
                 }
             }
+            temp_currObj = currObj;
             //jie: add for level 1
             //cout<<*query_data<<endl;
             //unsigned char *tmp = new unsigned char[128];
             //memcpy(tmp, (unsigned char *)query_data, 128);
+            //clean_dist_comp_time();
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates_g;
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set_g;
 
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates_l1 = searchFirstLayer(
-                    currObj, query_data);
-            currObj = top_candidates_l1.top().second;
+                    temp_currObj, query_data, ef_l1_, top_candidates_g, candidate_set_g);
+            //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates_l1 = searchFirstLayer(
+            //        temp_currObj, query_data, ef_l1_);
+
+            //cout<<top_candidates_l1.size()<<" "<<top_candidates_g.size()<<" "<<candidate_set_g.size()<<endl;
+
+            tableint tt_currObj;
+
+            while(!top_candidates_l1.empty())
+            {
+                tt_currObj = top_candidates_l1.top().second;
+                //cout <<top_candidates_l1.top().first<<" "<<top_candidates_l1.top().second<<endl;
+                //candidate_set_g.push(top_candidates_l1.top());
+                top_candidates_l1.pop();
+            }
+            //cout<<tt_currObj<<" "<<tt_bound<<endl;
+            //dist_t d1 = fstdistfunc_(query_data, getDataByInternalId(currObj), dist_func_param_);
+            //cout<<"gt: "<<currObj<<" "<<d1<<endl;
+
+            /*if(tt_currObj != currObj)
+            {
+                dist_t d1 = fstdistfunc_(query_data, getDataByInternalId(currObj), dist_func_param_);
+                dist_t d2 = fstdistfunc_(query_data, getDataByInternalId(tt_currObj), dist_func_param_);
+                if(d2>d1)
+                    cout<<"d2="<<d2<<", d1="<<d1<<endl;
+                else if (d2<d1)
+                    cout<<"find a better one!"<<endl;
+            }*/
+
             //std::cout<<" "<<hop<<" ";
             //clean_dist_comp_time();
+
+
+            while(top_candidates_g.size()>ef_reuse_)
+            {
+                top_candidates_g.pop();
+            }
+            //cout<<top_candidates_g.size()<<endl;
+
+
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> ttry;
             if (has_deletions_) { //seems never goes here?!?
                 //std::cout<<"has deletion"<<std::endl;
-                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST<true>(
-                        currObj, query_data, std::max(ef_, k));
+                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST_reuse<true>(
+                        tt_currObj, query_data, std::max(ef_, k), top_candidates_l1, top_candidates_g);
+                //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST<true>(
+                //        currObj, query_data, std::max(ef_, k));
                 top_candidates.swap(top_candidates1);
             }
             else{
-                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST<false>(
-                        currObj, query_data, std::max(ef_, k));
+                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST_reuse<false>(
+                        tt_currObj, query_data, std::max(ef_, k), top_candidates_l1, top_candidates_g);
+                //std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1=searchBaseLayerST<false>(
+                //        currObj, query_data, std::max(ef_, k));
                 top_candidates.swap(top_candidates1);
             }
             std::priority_queue<std::pair<dist_t, labeltype >> results;

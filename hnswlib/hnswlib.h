@@ -67,7 +67,6 @@ namespace hnswlib {
         }
     };
 
-
 }
 
 #include "space_l2.h"

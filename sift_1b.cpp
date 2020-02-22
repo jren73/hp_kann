@@ -167,13 +167,11 @@ test_approx(unsigned char *massQ, size_t vecsize, size_t qsize, HierarchicalNSW<
     size_t total = 0;
     //uncomment to test in parallel mode:
     //#pragma omp parallel for
-    StopW stopw = StopW();
     for (int i = 0; i < qsize; i++) {
-        stopw.reset();
+        //StopW stopw = StopW();
         std::priority_queue<std::pair<int, labeltype >> result = appr_alg.searchKnn(massQ + vecdim * i, k);
-        float time_us_per_query = stopw.getElapsedTimeMicro();
-        cout<<time_us_per_query<<endl;
-
+        //float time_us_per_query = stopw.getElapsedTimeMicro();
+        //cout<<i<<" "<<time_us_per_query<<" us\n";
         std::priority_queue<std::pair<int, labeltype >> gt(answers[i]);
         unordered_set<labeltype> g;
         total += gt.size();
@@ -202,30 +200,51 @@ static void
 test_vs_recall(unsigned char *massQ, size_t vecsize, size_t qsize, HierarchicalNSW<int> &appr_alg, size_t vecdim,
                vector<std::priority_queue<std::pair<int, labeltype >>> &answers, size_t k) {
     vector<size_t> efs;// = { 10,10,10,10,10 };
-    for (int i = k; i < 30; i++) {
+
+    efs.push_back(1);
+    /*
+    for (int i = k; i < 50; i++) {
         efs.push_back(i);
     }
-    for (int i = 30; i < 100; i += 10) {
+    for (int i = 50; i < 150; i += 25) {
         efs.push_back(i);
-    }
-    for (int i = 100; i < 600; i += 40) {
+    }*/
+  /*  for (int i = 100; i < 500; i += 40) {
         efs.push_back(i);
+    }*/
+    vector<size_t> ef_l1, ef_reuse;
+    for(int i=1; i<=36; i++)
+    {
+        ef_reuse.push_back(i);
     }
-    //for (size_t ef : efs) {
-        size_t ef = 300;
+    /*for (int i = 50; i < 150; i += 25) {
+        ef_reuse.push_back(i);
+    }*/
+    ef_l1.push_back(36);
+
+    for(size_t ef_reuse_:ef_reuse)
+    {
+      //cout<<ef_reuse_<<endl;
+    for(size_t ef_l1_:ef_l1)
+    {
+      //cout<<ef_l1_<<endl;
+    for (size_t ef : efs) {
+        appr_alg.setEf_reuse(ef_reuse_);
         appr_alg.setEf(ef);
-        //StopW stopw = StopW();
+        appr_alg.setEf_l1(ef_l1_);
+        StopW stopw = StopW();
 
         float recall = test_approx(massQ, vecsize, qsize, appr_alg, vecdim, answers, k);
-        //float time_us_per_query = stopw.getElapsedTimeMicro() / qsize;
-        cout << ef << "\t" << recall << "\n";
-        //cout << ef << "\t" << recall << "\t" << time_us_per_query << " us\n";
+        float time_us_per_query = stopw.getElapsedTimeMicro() / qsize;
+        //cout << ef << "\t" << recall << "\t" <<endl;
+        cout << ef_reuse_ << "\t" << recall << "\t" << time_us_per_query << " us\n";
         if (recall > 1.0) {
-            //cout << recall << "\t" << time_us_per_query << " us\n";
-            cout << recall << "\n";
-            //break;
-        //}
+            cout << recall << "\t" << time_us_per_query << " us\n";
+            break;
+        }
     }
+  }
+  }
 }
 
 inline bool exists_test(const std::string &name) {
@@ -237,10 +256,10 @@ inline bool exists_test(const std::string &name) {
 void sift_test1B() {
 
 
-	int subset_size_milllions = 50;
-	int efConstruction = 40;
+	int subset_size_milllions = 10;
+	int efConstruction = 100;
 	int M = 16;
-
+  int pr=2; //promotion rate 1/pr
 
     size_t vecsize = subset_size_milllions * 1000000;
 
@@ -250,8 +269,9 @@ void sift_test1B() {
     char path_gt[1024];
     char *path_q = "bigann/bigann_query.bvecs";
     char *path_data = "bigann/bigann_base.bvecs";
-    sprintf(path_index, "sift1b_%dm_ef_%d_M_%d.bin", subset_size_milllions, efConstruction, M);
-
+    //jie: build new graph
+    sprintf(path_index, "sift1b_%dm_ef_%d_M_%d_pr_%d_new.bin", subset_size_milllions, efConstruction, M, pr);
+    //sprintf(path_index, "sift1b_%dm_ef_%d_M_%d.bin", subset_size_milllions, efConstruction, M);
     sprintf(path_gt, "bigann/gnd/idx_%dM.ivecs", subset_size_milllions);
 
 
@@ -365,13 +385,7 @@ void sift_test1B() {
     for (int i = 0; i < 1; i++)
         test_vs_recall(massQ, vecsize, qsize, *appr_alg, vecdim, answers, k);
     cout << "Actual memory usage: " << getCurrentRSS() / 1000000 << " Mb \n";
-    cout << "Peak memory usage: "<<getPeakRSS()/ 1000000 << " Mb \n";
     return;
 
 
 }
-
-int main() {
-    sift_test1B();
-    return 0;
-};
